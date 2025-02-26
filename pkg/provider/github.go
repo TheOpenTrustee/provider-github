@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -17,7 +19,13 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// Taken from https://github.com/Masterminds/semver/blob/master/version.go licence by MIT
+const semVerRegex string = `v?(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?` +
+	`(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?` +
+	`(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?`
+
 var PVERSION = "dev"
+var DEFAULT_TAG_FORMAT = "{{.Version}}" // no "v" prefix because Version is asumed to have v as a prefix if strip_v_tag_prefix is false
 
 type GitHubRepository struct {
 	owner           string
@@ -25,6 +33,8 @@ type GitHubRepository struct {
 	stripVTagPrefix bool
 	client          *github.Client
 	compareCommits  bool
+	tagFormat       *template.Template
+	tagRegex        *regexp.Regexp
 }
 
 func (repo *GitHubRepository) Init(config map[string]string) error {
@@ -70,7 +80,29 @@ func (repo *GitHubRepository) Init(config map[string]string) error {
 		repo.compareCommits = true
 	}
 
+	tagFormat := DEFAULT_TAG_FORMAT
+	if config["tag_format"] != "" {
+		tagFormat = config["tag_format"]
+	}
+
 	var err error
+	repo.tagFormat, err = template.New("tagFormat").Funcs(template.FuncMap{
+		"env": func(key string) string {
+			if strings.HasPrefix(key, "SEMREL_") {
+				return os.Getenv(key)
+			}
+			return ""
+		},
+	}).Parse(tagFormat)
+	if err != nil {
+		return fmt.Errorf("failed to parse tag_format: %w", err)
+	}
+
+	var buf bytes.Buffer
+	repo.tagFormat.Execute(&buf, map[string]string{"Version": semVerRegex})
+
+	repo.tagRegex = regexp.MustCompile(buf.String())
+
 	stripVTagPrefix := config["strip_v_tag_prefix"]
 	repo.stripVTagPrefix, err = strconv.ParseBool(stripVTagPrefix)
 
@@ -170,6 +202,11 @@ func (repo *GitHubRepository) GetReleases(rawRe string) ([]*semrel.Release, erro
 			if rawRe != "" && !re.MatchString(tag) {
 				continue
 			}
+
+			if !repo.tagRegex.MatchString(tag) {
+				continue
+			}
+
 			objType := r.Object.GetType()
 			if objType != "commit" && objType != "tag" {
 				continue
@@ -207,7 +244,10 @@ func (repo *GitHubRepository) CreateRelease(release *provider.CreateReleaseConfi
 		prefix = ""
 	}
 
-	tag := prefix + release.NewVersion
+	var buf bytes.Buffer
+	repo.tagFormat.Execute(&buf, map[string]string{"Version": prefix + release.NewVersion})
+
+	tag := buf.String()
 	isPrerelease := release.Prerelease || semver.MustParse(release.NewVersion).Prerelease() != ""
 
 	if release.Branch != release.SHA {
