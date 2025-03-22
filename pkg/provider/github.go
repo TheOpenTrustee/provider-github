@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -20,9 +21,9 @@ import (
 )
 
 // Taken from https://github.com/Masterminds/semver/blob/master/version.go licence by MIT
-const semVerRegex string = `v?(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?` +
+const semVerRegex string = `(?P<version>v?(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?` +
 	`(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?` +
-	`(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?`
+	`(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?)`
 
 var PVERSION = "dev"
 var DEFAULT_TAG_FORMAT = "{{.Version}}" // no "v" prefix because Version is asumed to have v as a prefix if strip_v_tag_prefix is false
@@ -198,6 +199,7 @@ func (repo *GitHubRepository) GetReleases(rawRe string) ([]*semrel.Release, erro
 			return nil, err
 		}
 		for _, r := range refs {
+			reformatForSemver := false
 			tag := strings.TrimPrefix(r.GetRef(), "refs/tags/")
 			if rawRe != "" && !re.MatchString(tag) {
 				continue
@@ -205,6 +207,8 @@ func (repo *GitHubRepository) GetReleases(rawRe string) ([]*semrel.Release, erro
 
 			if !repo.tagRegex.MatchString(tag) {
 				continue
+			} else {
+				reformatForSemver = true
 			}
 
 			objType := r.Object.GetType()
@@ -223,6 +227,16 @@ func (repo *GitHubRepository) GetReleases(rawRe string) ([]*semrel.Release, erro
 				}
 				foundSha = resTag.Object.GetSHA()
 			}
+
+			if reformatForSemver {
+				matches := mustExtractNamedGroups(repo.tagRegex, tag)
+				tag = matches["version"]
+				if tag == "" {
+					log.Printf("Skipping tag %s as it does not have a version or tag format does not contain a named capture group 'version'", tag)
+					continue
+				}
+			}
+
 			version, err := semver.NewVersion(tag)
 			if err != nil {
 				continue
@@ -279,4 +293,20 @@ func (repo *GitHubRepository) Name() string {
 
 func (repo *GitHubRepository) Version() string {
 	return PVERSION
+}
+
+// ExtractNamedGroups returns a map of named capture groups
+func mustExtractNamedGroups(re *regexp.Regexp, input string) map[string]string {
+	result := make(map[string]string)
+	match := re.FindStringSubmatch(input)
+	if match == nil {
+		return result
+	}
+
+	for i, name := range re.SubexpNames() {
+		if i > 0 && name != "" { // Ignore index 0 (whole match) and unnamed groups
+			result[name] = match[i]
+		}
+	}
+	return result
 }
